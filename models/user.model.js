@@ -101,6 +101,7 @@ const userSchema = new mongoose.Schema(
   }
 );
 
+userSchema.index({ role: 1 });
 userSchema.index({ phone: 1 });
 userSchema.index({ createdAt: -1 });
 
