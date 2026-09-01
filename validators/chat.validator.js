@@ -13,6 +13,7 @@ exports.startChatSchema = Joi.object({
     ipAddress: Joi.string().ip().optional(),
     referrer: Joi.string().uri().allow('').optional(),
   }).optional(),
+  guestSessionId: Joi.string().optional(), // Allow guest session ID to pass through
 });
 
 exports.sendMessageSchema = Joi.object({
@@ -34,6 +35,7 @@ exports.sendMessageSchema = Joi.object({
       "array.max": "Maximum of 3 attachments allowed per message",
     }),
   isInternalNote: Joi.boolean().optional().default(false),
+  guestSessionId: Joi.string().optional(), // Allow guest session ID to pass through
 });
 
 exports.updateTypingSchema = Joi.object({
@@ -58,9 +60,11 @@ exports.getChatsQuerySchema = Joi.object({
   sortBy: Joi.string()
     .valid("lastMessageAt", "createdAt", "priority")
     .default("lastMessageAt"),
+  guestSessionId: Joi.string().optional(), // Allow guest session ID to pass through
 });
 
 exports.getMessagesQuerySchema = Joi.object({
   page: Joi.number().integer().min(1).default(1),
   limit: Joi.number().integer().min(1).max(100).default(50),
+  guestSessionId: Joi.string().optional(), // Allow guest session ID to pass through
 });

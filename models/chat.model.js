@@ -5,7 +5,13 @@ const chatSchema = new mongoose.Schema(
     customer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: [true, "Chat must have a customer"],
+      required: false,
+      index: true,
+    },
+    guestSession: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "GuestSession",
+      required: false,
       index: true,
     },
     status: {
@@ -95,10 +101,25 @@ const chatSchema = new mongoose.Schema(
   }
 );
 
+// Validation: chat must have either customer OR guestSession, but not both
+chatSchema.pre("save", async function () {
+  const hasCustomer = !!this.customer;
+  const hasGuestSession = !!this.guestSession;
+
+  if (!hasCustomer && !hasGuestSession) {
+    throw new Error("Chat must have either customer (authenticated) or guestSession (guest), but not neither");
+  }
+
+  if (hasCustomer && hasGuestSession) {
+    throw new Error("Chat cannot have both customer and guestSession simultaneously");
+  }
+});
+
 chatSchema.index({ customer: 1, status: 1 });
 chatSchema.index({ createdAt: -1 });
 chatSchema.index({ lastMessageAt: -1 });
 chatSchema.index({ status: 1, lastMessageAt: -1 });
+chatSchema.index({ guestSession: 1, status: 1 });
 
 chatSchema.virtual("isActive").get(function () {
   return ["ai_handling", "escalated", "agent_handling"].includes(this.status);
@@ -110,7 +131,7 @@ chatSchema.virtual("messages", {
   foreignField: "chat",
 });
 
-chatSchema.pre("save", function () {
+chatSchema.pre("save", async function () {
   if (this.isModified("status")) {
     if (
       (this.status === "closed" || this.status === "resolved") &&
@@ -210,3 +231,4 @@ chatSchema.statics.getWaitingQueue = async function () {
 };
 
 module.exports = mongoose.model("Chat", chatSchema);
+

@@ -16,11 +16,24 @@ class NotificationGateway {
     this.io.use(async (socket, next) => {
       try {
         const token = socket.handshake.auth.token;
-        if (!token) return next(new Error("Authentication error"));
+        const guestSessionId = socket.handshake.auth.guestSessionId;
 
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        socket.userId = decoded.id;
-        socket.role = decoded.role;
+        if (token) {
+          // Authenticated user
+          const decoded = jwt.verify(token, process.env.JWT_SECRET);
+          socket.userId = decoded.id;
+          socket.role = decoded.role;
+          socket.isGuest = false;
+        } else if (guestSessionId) {
+          // Guest user
+          socket.guestSessionId = guestSessionId;
+          socket.userId = null; // No user ID for guests
+          socket.role = "customer";
+          socket.isGuest = true;
+        } else {
+          return next(new Error("Authentication error"));
+        }
+
         next();
       } catch (err) {
         next(new Error("Authentication error"));
@@ -28,7 +41,12 @@ class NotificationGateway {
     });
 
     this.io.on("connection", (socket) => {
-      socket.join(socket.userId);
+      // Join user to personal room
+      if (socket.userId) {
+        socket.join(socket.userId); // Authenticated users join by ID
+      } else if (socket.guestSessionId) {
+        socket.join(`guest:${socket.guestSessionId}`); // Guests join by session ID
+      }
 
       if (socket.role === "admin") {
         socket.join("admin:notifications");
@@ -37,13 +55,13 @@ class NotificationGateway {
       socket.on("chat:join", ({ chatId }) => {
         const room = `chat:${chatId}`;
         socket.join(room);
-        console.log(`Socket ${socket.id} (User: ${socket.userId}) joined room ${room}`);
+        console.log(`Socket ${socket.id} (${socket.isGuest ? 'Guest' : 'User'}: ${socket.userId || socket.guestSessionId}) joined room ${room}`);
       });
 
       socket.on("chat:leave", ({ chatId }) => {
         const room = `chat:${chatId}`;
         socket.leave(room);
-        console.log(`Socket ${socket.id} (User: ${socket.userId}) left room ${room}`);
+        console.log(`Socket ${socket.id} (${socket.isGuest ? 'Guest' : 'User'}: ${socket.userId || socket.guestSessionId}) left room ${room}`);
       });
 
       socket.on("chat:typing", ({ chatId, isTyping }) => {

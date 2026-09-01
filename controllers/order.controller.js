@@ -44,12 +44,25 @@ const verifyEsewaSignature = (responseData) => {
 const prepareOrderItems = async (items, session = null) => {
   const orderItems = [];
 
+  // FIX: Batch fetch all products instead of one query per item (N+1 prevention)
+  // Extract all product IDs first
+  const productIds = items.map((item) => item.productId || item.product);
+
+  // Single batch query for all products
+  const products = await Product.find({
+    _id: { $in: productIds },
+  }).session(session);
+
+  // Create a map for O(1) lookup
+  const productMap = new Map(products.map((p) => [p._id.toString(), p]));
+
+  // Validate and prepare items
   for (const item of items) {
-    const product = await Product.findById(
-      item.productId || item.product,
-    ).session(session);
+    const productId = item.productId || item.product;
+    const product = productMap.get(productId.toString());
+
     if (!product) {
-      throw new AppError(`Product not found: ${item.productId}`, 404);
+      throw new AppError(`Product not found: ${productId}`, 404);
     }
     if (product.stock < item.quantity) {
       throw new AppError(`Insufficient stock for ${product.name}`, 400);
@@ -258,20 +271,30 @@ exports.guestCheckout = catchAsync(async (req, res, next) => {
 
     // Update product stock within transaction (only for non-eSewa orders like COD)
     if (paymentMethod !== "esewa") {
-      for (const item of orderItems) {
-        const updatedProduct = await Product.findOneAndUpdate(
-          {
+      // FIX: Batch update all products with bulkWrite instead of individual updates (N+1 prevention)
+      const bulkOps = orderItems.map((item) => ({
+        updateOne: {
+          filter: {
             _id: item.product,
             stock: { $gte: item.quantity },
           },
-          {
+          update: {
             $inc: { stock: -item.quantity },
           },
-          session ? { session, new: true } : { new: true },
-        );
+        },
+      }));
 
-        if (!updatedProduct) {
-          throw new AppError("Insufficient stock for product in your cart. Please review.", 400);
+      if (bulkOps.length > 0) {
+        const result = await Product.bulkWrite(bulkOps, {
+          session: session || undefined,
+        });
+
+        // Verify all products were updated
+        if (result.modifiedCount !== orderItems.length) {
+          throw new AppError(
+            "Insufficient stock for one or more products in your cart. Please review.",
+            400
+          );
         }
       }
     }
@@ -474,20 +497,30 @@ exports.authenticatedCheckout = catchAsync(async (req, res, next) => {
 
     // Update stock within transaction (only for non-eSewa orders like COD)
     if (paymentMethod !== "esewa") {
-      for (const item of orderItems) {
-        const updatedProduct = await Product.findOneAndUpdate(
-          {
+      // FIX: Batch update all products with bulkWrite instead of individual updates (N+1 prevention)
+      const bulkOps = orderItems.map((item) => ({
+        updateOne: {
+          filter: {
             _id: item.product,
             stock: { $gte: item.quantity },
           },
-          {
+          update: {
             $inc: { stock: -item.quantity },
           },
-          session ? { session, new: true } : { new: true },
-        );
+        },
+      }));
 
-        if (!updatedProduct) {
-          throw new AppError("Insufficient stock for product in your cart. Please review.", 400);
+      if (bulkOps.length > 0) {
+        const result = await Product.bulkWrite(bulkOps, {
+          session: session || undefined,
+        });
+
+        // Verify all products were updated
+        if (result.modifiedCount !== orderItems.length) {
+          throw new AppError(
+            "Insufficient stock for one or more products in your cart. Please review.",
+            400
+          );
         }
       }
     }
@@ -794,10 +827,16 @@ exports.updateOrderStatus = catchAsync(async (req, res, next) => {
 
   // If cancelled, restore stock
   if (status === "cancelled" && order.orderStatus !== "cancelled") {
-    for (const item of order.items) {
-      await Product.findByIdAndUpdate(item.product, {
-        $inc: { stock: item.quantity },
-      });
+    // FIX: Batch restore stock with bulkWrite instead of individual updates (N+1 prevention)
+    const bulkOps = order.items.map((item) => ({
+      updateOne: {
+        filter: { _id: item.product },
+        update: { $inc: { stock: item.quantity } },
+      },
+    }));
+
+    if (bulkOps.length > 0) {
+      await Product.bulkWrite(bulkOps);
     }
   }
 
@@ -1020,10 +1059,16 @@ exports.cancelOrder = catchAsync(async (req, res, next) => {
     order.paymentStatus = "refunded";
   }
 
-  for (const item of order.items) {
-    await Product.findByIdAndUpdate(item.product, {
-      $inc: { stock: item.quantity },
-    });
+  // FIX: Batch restore stock with bulkWrite instead of individual updates (N+1 prevention)
+  const bulkOps = order.items.map((item) => ({
+    updateOne: {
+      filter: { _id: item.product },
+      update: { $inc: { stock: item.quantity } },
+    },
+  }));
+
+  if (bulkOps.length > 0) {
+    await Product.bulkWrite(bulkOps);
   }
 
   await order.save();
