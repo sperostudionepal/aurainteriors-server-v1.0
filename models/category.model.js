@@ -63,6 +63,8 @@ categorySchema.virtual("productCount", {
 
 categorySchema.index({ parent: 1 });
 categorySchema.index({ status: 1 });
+// OPTIMIZATION: Add compound index for tree queries (Phase 2a fix)
+categorySchema.index({ parent: 1, status: 1 }); // For getCategoryTree queries
 
 categorySchema.pre("save", function (next) {
   if (this.isModified("name") || !this.slug) {

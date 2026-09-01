@@ -5,6 +5,7 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
+const compression = require("compression");
 const mongoose = require("mongoose");
 const passport = require("./config/passport");
 const http = require("http");
@@ -105,6 +106,10 @@ app.use(
     crossOriginResourcePolicy: { policy: "cross-origin" },
   }),
 );
+
+// Enable response compression (gzip/brotli) for all responses
+// Reduces typical JSON payload by 5-8x (15KB → 3KB)
+app.use(compression({ level: 6, threshold: 1024 }));
 
 app.use(cookieParser());
 app.use(express.json());

@@ -1,4 +1,5 @@
 const AppError = require("../utils/AppError");
+const { AuthRequiredError, RateLimitError } = require("../utils/errors");
 
 const handleCastErrorDB = (err) => {
   const message = `Invalid ${err.path}: ${err.value}`;
@@ -45,6 +46,28 @@ const sendErrorDev = (err, res) => {
 
 const sendErrorProd = (err, res) => {
   if (err.isOperational) {
+    // Handle structured AUTH_REQUIRED errors
+    if (err.code === "AUTH_REQUIRED" || err.isAuthRequired) {
+      return res.status(err.statusCode).json({
+        status: "fail",
+        code: "AUTH_REQUIRED",
+        message: err.message,
+        suggestion: err.suggestion || "Please sign in or create an account",
+        actions: err.actions || ["sign_in", "create_account"],
+      });
+    }
+
+    // Handle RATE_LIMIT errors
+    if (err.code === "RATE_LIMIT_EXCEEDED") {
+      return res.status(err.statusCode).json({
+        status: "fail",
+        code: "RATE_LIMIT_EXCEEDED",
+        message: err.message,
+        retryAfter: err.retryAfter || 900,
+      });
+    }
+
+    // Standard operational error
     res.status(err.statusCode).json({
       status: err.status,
       message: err.message,

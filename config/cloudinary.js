@@ -1,4 +1,5 @@
 const cloudinary = require("cloudinary").v2;
+const crypto = require("crypto");
 
 const getCloudinaryConfig = () => {
     if (!cloudinary.config().cloud_name) {
@@ -38,9 +39,24 @@ const deleteFromCloudinary = async (publicId, resourceType = "image") => {
     }
 };
 
+/**
+ * Generate an unsigned upload signature for client-side direct uploads
+ * Uses Cloudinary's unsigned upload feature (requires upload_preset)
+ */
+const generateUploadSignature = (folder = "aura/chat") => {
+    // For unsigned uploads, we just need to return upload credentials
+    // Cloudinary will accept files directly without signature verification
+    return {
+        cloudName: process.env.CLOUDINARY_CLOUD_NAME,
+        folder,
+        uploadPreset: process.env.CLOUDINARY_UPLOAD_PRESET || "aura_unsigned", // Must be configured in Cloudinary dashboard
+    };
+};
+
 module.exports = {
     cloudinary,
     getCloudinaryConfig,
     uploadToCloudinary,
     deleteFromCloudinary,
+    generateUploadSignature,
 };

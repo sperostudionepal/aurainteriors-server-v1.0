@@ -185,7 +185,6 @@ class ChatOrchestrator {
     const chunks = text.match(/.{1,4}/g) || [];
     for (const chunk of chunks) {
       this._emitToRoom(chatRoomId, "ai:token", { chatId: chatRoomId, token: chunk });
-      await new Promise((resolve) => setTimeout(resolve, 30));
     }
 
     this._emitToRoom(chatRoomId, "ai:complete", { chatId: chatRoomId });
@@ -240,7 +239,6 @@ class ChatOrchestrator {
     // 1. Fast Path - Greetings
     if (/^\s*(hi|hello|hey|howdy|greetings|good\s+(?:morning|afternoon|evening|day)|welcome)\s*$/i.test(cleanMessage)) {
       this._emitToRoom(chatRoomId, "ai:thinking_start", { chatId: chatRoomId });
-      await new Promise((resolve) => setTimeout(resolve, 1000));
       const reply = "Hello! Welcome to Aura Interiors. I'm Aura Assistant, your home design and support assistant. How can I help you find the perfect piece or assist you with your orders today?";
       this._emitToRoom(chatRoomId, "ai:thinking_stop", { chatId: chatRoomId });
       console.log(`[ORCHESTRATOR] Fast-path Greeting matched. Completed in ${Date.now() - startTime}ms.`);
@@ -250,7 +248,6 @@ class ChatOrchestrator {
     // 2. Fast Path - Name
     if (/who\s+are\s+you|what\s+is\s+your\s+name|whats\s+your\s+name|your\s+name/i.test(cleanMessage)) {
       this._emitToRoom(chatRoomId, "ai:thinking_start", { chatId: chatRoomId });
-      await new Promise((resolve) => setTimeout(resolve, 1000));
       const reply = "I'm Aura Assistant, your dedicated home-interiors and support assistant at Aura Interiors. I'm here to help you browse our catalog, check orders, and manage your account details. What can I do for you today?";
       this._emitToRoom(chatRoomId, "ai:thinking_stop", { chatId: chatRoomId });
       console.log(`[ORCHESTRATOR] Fast-path Name matched. Completed in ${Date.now() - startTime}ms.`);
@@ -260,7 +257,6 @@ class ChatOrchestrator {
     // 3. Fast Path - Capabilities
     if (/what\s+can\s+you\s+do|what\s+can\s+you\s+help|how\s+can\s+you\s+help|capabilities/i.test(cleanMessage)) {
       this._emitToRoom(chatRoomId, "ai:thinking_start", { chatId: chatRoomId });
-      await new Promise((resolve) => setTimeout(resolve, 1000));
       const reply = "I can help you browse our product catalog, get detailed specifications and stock levels, look up your order history and tracking status, check your default or saved addresses, or view your profile information. If you ever need complex assistance, you can click the 'Talk to a human' button above the chat input field to connect with a representative.";
       this._emitToRoom(chatRoomId, "ai:thinking_stop", { chatId: chatRoomId });
       console.log(`[ORCHESTRATOR] Fast-path Capabilities matched. Completed in ${Date.now() - startTime}ms.`);
@@ -270,7 +266,6 @@ class ChatOrchestrator {
     // 4. Fast Path - Bot / Identity
     if (/are\s+you\s+a\s+bot|are\s+you\s+ai|are\s+you\s+a\s+robot|are\s+you\s+human|real\s+person/i.test(cleanMessage)) {
       this._emitToRoom(chatRoomId, "ai:thinking_start", { chatId: chatRoomId });
-      await new Promise((resolve) => setTimeout(resolve, 1000));
       const reply = "I am Aura Assistant, the AI support chatbot for Aura Interiors. I can instantly look up products, orders, and addresses. If you'd prefer to speak with a human support agent, you can click the 'Talk to a human' button above the chat input field at any time!";
       this._emitToRoom(chatRoomId, "ai:thinking_stop", { chatId: chatRoomId });
       console.log(`[ORCHESTRATOR] Fast-path Bot Identity matched. Completed in ${Date.now() - startTime}ms.`);
@@ -358,6 +353,15 @@ ${contextText}
 Customer Context:
 ${customerContext}
 
+TOOL AVAILABILITY BY AUTH STATUS:
+- GUEST USERS (not logged in):
+  * ✓ Can use: searchProducts, getProductDetails, getOrderStatus (via orderId + email)
+  * ✗ Cannot use: getOrderHistory, getDefaultAddress, getSavedAddresses, getProfileInfo
+  * When guest tries to use auth-required tools: Respond warmly with graceful decline. NO tool names. Explain they need to create an account or sign in, then offer them the option to do so. Example: "I'd love to help with that, but I need you to be logged into your account to access your saved addresses. Would you like to create a free account or sign in now?"
+
+- LOGGED-IN USERS:
+  * ✓ Can use: All tools (searchProducts, getProductDetails, getOrderStatus, getOrderHistory, getDefaultAddress, getSavedAddresses, getProfileInfo)
+
 Rules:
 1. Try to answer user questions using the Knowledge Context above.
 2. If the user asks about product prices, details, inventory, category listings, order history, addresses, or profile info, ALWAYS call the corresponding database tools instead of guessing.
@@ -365,7 +369,8 @@ Rules:
 4. Links: When mentioning products or providing links, always format them as markdown links: [Product Name](url). Only use URLs you received from tool results — never construct or guess a URL yourself.
 5. Catalog Validation: Before recommending any product mentioned in the RAG context, you MUST verify that the product exists and is active in the live store by calling 'searchProducts' or 'getProductDetails'. If the search fails or the product is out of stock, DO NOT recommend it.
 6. NO ORDER PLACEMENT: You cannot place orders, edit addresses, or process payments directly. If the customer wants to make a purchase, guide them to complete it themselves by providing the direct product page link.
-7. NO MANUAL ESCALATION: You cannot transfer users to human agents. If they request an agent or you cannot answer, direct them to use the 'Talk to a human' button above the chat input area.`;
+7. NO MANUAL ESCALATION: You cannot transfer users to human agents. If they request an agent or you cannot answer, direct them to use the 'Talk to a human' button above the chat input area.
+8. GRACEFUL DEGRADATION: If a guest asks for a feature that requires authentication, respond warmly in natural language (no tool mentions) and offer a sign-in suggestion. Continue the conversation normally.`;
 
       const apiMessages = [{ role: "system", content: systemPrompt }, ...messages];
 
@@ -507,8 +512,21 @@ Rules:
 
           let toolOutput = "";
 
-          // Execute read-only tools
-          if (name === "searchProducts") {
+          // ===== GUEST DEGRADATION LOGIC =====
+          // Auth-required tools: return graceful degradation message when guest (no customerId)
+          const authRequiredTools = ["getOrderHistory", "getDefaultAddress", "getSavedAddresses", "getProfileInfo"];
+          if (authRequiredTools.includes(name) && !customerId) {
+            console.log(`[ORCHESTRATOR] Guest user attempted auth-required tool: ${name}. Returning degradation message.`);
+            const degradationMessage = `I'd love to help with that, but I need you to be logged into your account to access your saved information. Once you create a free account or sign in, I'll be able to help you manage your profile, addresses, and view your complete order history. Would you like to create an account or sign in now?`;
+            toolOutput = JSON.stringify({
+              error: "requires_account",
+              message: degradationMessage,
+              userFacing: true,
+              suggestion: "Please sign in or create an account to access this feature."
+            });
+          }
+          // ===== END GUEST DEGRADATION LOGIC =====
+          else if (name === "searchProducts") {
             const products = await dbTools.searchProducts(args);
             toolOutput = JSON.stringify(products);
 
@@ -533,30 +551,6 @@ Rules:
             }
             const status = await dbTools.getOrderStatus(args);
             toolOutput = JSON.stringify(status);
-          } else if (name === "getOrderHistory") {
-            if (customerId && !args.userId) {
-              args.userId = customerId;
-            }
-            const history = await dbTools.getOrderHistory(args);
-            toolOutput = JSON.stringify(history);
-          } else if (name === "getDefaultAddress") {
-            if (customerId && !args.userId) {
-              args.userId = customerId;
-            }
-            const address = await dbTools.getDefaultAddress(args);
-            toolOutput = JSON.stringify(address);
-          } else if (name === "getSavedAddresses") {
-            if (customerId && !args.userId) {
-              args.userId = customerId;
-            }
-            const addresses = await dbTools.getSavedAddresses(args);
-            toolOutput = JSON.stringify(addresses);
-          } else if (name === "getProfileInfo") {
-            if (customerId && !args.userId) {
-              args.userId = customerId;
-            }
-            const profile = await dbTools.getProfileInfo(args);
-            toolOutput = JSON.stringify(profile);
           } else {
             toolOutput = JSON.stringify({ error: `Tool ${name} not found or descoped.` });
           }

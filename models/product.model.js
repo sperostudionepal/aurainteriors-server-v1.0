@@ -236,6 +236,13 @@ productSchema.index({ createdAt: -1 });
 productSchema.index({ isFeatured: 1 });
 productSchema.index({ deletedAt: 1 });
 
+// OPTIMIZATION: Add compound indexes for common filter combinations (Phase 2a fix)
+// These speed up queries on home page and filter operations
+productSchema.index({ status: 1, category: 1 }); // Home page products filtered by status + category
+productSchema.index({ isFeatured: 1, createdAt: -1 }); // Featured products sort
+productSchema.index({ isNewArrival: 1, createdAt: -1 }); // New arrivals sort
+productSchema.index({ deletedAt: 1, status: 1 }); // Soft delete + status filters
+
 // Virtual for discount percentage
 productSchema.virtual("discountPercentage").get(function () {
   if (this.originalPrice && this.originalPrice > this.price) {

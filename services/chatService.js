@@ -1,12 +1,13 @@
 const Chat = require("../models/chat.model");
 const ChatMessage = require("../models/chatMessage.model");
+const GuestSession = require("../models/guestSession.model");
 const AppError = require("../utils/AppError");
 const notificationEventEmitter = require("./notificationEventEmitter");
 const User = require("../models/user.model");
 
 class ChatService {
   async createChat(customerId, data = {}) {
-        const { subject, metadata } = data;
+    const { subject, metadata } = data;
 
     const chat = await Chat.create({
       customer: customerId,
@@ -61,6 +62,63 @@ class ChatService {
     return populatedChat;
   }
 
+  /**
+   * Create a chat for a guest user (unauthenticated)
+   * Similar to createChat but uses guestSession instead of customer
+   */
+  async createGuestChat(guestSessionId, data = {}) {
+    const { subject, metadata } = data;
+
+    // Verify guest session exists
+    const guestSession = await GuestSession.findById(guestSessionId);
+    if (!guestSession) {
+      throw new AppError("Invalid guest session", 400);
+    }
+
+    const chat = await Chat.create({
+      guestSession: guestSessionId,
+      subject,
+      metadata: {
+        ...(metadata || {}),
+        botActive: true,
+      },
+      status: "ai_handling",
+    });
+
+    // Add chat to guest session's chats array
+    guestSession.chats.push(chat._id);
+    guestSession.lastActivityAt = new Date();
+    await guestSession.save();
+
+    // Auto-create Welcome Message from AI bot
+    try {
+      const admin = await User.findOne({ role: 'admin' }).select('_id');
+
+      if (admin) {
+        await ChatMessage.create({
+          chat: chat._id,
+          sender: admin._id,
+          senderRole: 'bot',
+          isAiGenerated: true,
+          messageType: 'text',
+          content: 'Hello! Welcome to Aura Interiors. How can I help you find the perfect piece for your home?',
+          deliveredAt: new Date(),
+          isRead: true
+        });
+
+        // Update chat unread/lastMessage
+        await Chat.findByIdAndUpdate(chat._id, {
+          lastMessageAt: new Date(),
+          $inc: { unreadCountCustomer: 1 }
+        });
+      }
+    } catch (msgError) {
+      console.error("Failed to create automated welcome message:", msgError.message);
+    }
+
+    return chat;
+  }
+
   async enrichChatWithUnreadCounts(chatJson) {
     if (!chatJson) return chatJson;
 
@@ -107,7 +165,39 @@ class ChatService {
     };
   }
 
-  async getChatById(chatId, userId, userRole) {
+  /**
+   * Verify if a user (authenticated or guest) can access a chat
+   * Returns true if authorized, false otherwise
+   */
+  async authorizeChat(chatId, userId, userRole, guestSessionId) {
+    const chat = await Chat.findOne({
+      _id: chatId,
+      deletedAt: null,
+    });
+
+    if (!chat) {
+      return false;
+    }
+
+    // Admin and bot can access any chat
+    if (["admin", "bot"].includes(userRole)) {
+      return true;
+    }
+
+    // Authenticated customer accessing their own chat
+    if (userId && chat.customer && chat.customer.toString() === userId.toString()) {
+      return true;
+    }
+
+    // Guest accessing their own chat via session ID
+    if (guestSessionId && chat.guestSession && chat.guestSession.toString() === guestSessionId.toString()) {
+      return true;
+    }
+
+    return false;
+  }
+
+  async getChatById(chatId, userId, userRole, guestSessionId) {
     const chat = await Chat.findOne({
       _id: chatId,
       deletedAt: null,
@@ -117,7 +207,9 @@ class ChatService {
       throw new AppError("Chat not found", 404);
     }
 
-    if (userRole !== "admin" && chat.customer._id.toString() !== userId.toString()) {
+    // Authorization check
+    const isAuthorized = await this.authorizeChat(chatId, userId, userRole, guestSessionId);
+    if (!isAuthorized) {
       throw new AppError("You are not authorized to view this chat", 403);
     }
 
@@ -146,8 +238,9 @@ class ChatService {
     return Promise.all(chats.map((chat) => this.enrichChatWithUnreadCounts(chat)));
   }
 
-  async sendMessage(chatId, senderId, senderRole, data = {}) {
+  async sendMessage(chatId, senderId, senderRole, data = {}, guestSessionId = null) {
     const { content, attachments, isInternalNote } = data;
+    const GuestUserService = require("./guestUserService");
 
     const chat = await Chat.findOne({
       _id: chatId,
@@ -158,9 +251,16 @@ class ChatService {
       throw new AppError("Chat not found", 404);
     }
 
-    // FIX 8: allow 'bot' senderRole in addition to 'admin'
-    if (!['admin', 'bot'].includes(senderRole) && chat.customer.toString() !== senderId.toString()) {
+    // Authorization check for message sender
+    const isAuthorized = await this.authorizeChat(chatId, senderId, senderRole, guestSessionId);
+    if (!isAuthorized) {
       throw new AppError("You are not authorized to message this chat", 403);
+    }
+
+    // For guest customers without senderId, use the system guest user placeholder
+    let actualSenderId = senderId;
+    if (senderRole === 'customer' && !senderId && guestSessionId) {
+      actualSenderId = await GuestUserService.getGuestUserId();
     }
 
     let messageType = "text";
@@ -171,7 +271,7 @@ class ChatService {
 
     const message = await ChatMessage.create({
       chat: chatId,
-      sender: senderId,
+      sender: actualSenderId,
       senderRole,
       messageType,
       isInternalNote: isInternalNote || false,
@@ -301,7 +401,7 @@ class ChatService {
         try {
           // Get admin/bot user record (system agent)
           const botUser = await User.findOne({ role: "admin" }).select("_id email");
-          const botUserId = botUser ? botUser._id : senderId;
+          const botUserId = botUser ? botUser._id : actualSenderId;
 
           // AI reads the customer's message right before processing it
           await ChatMessage.markAsRead(chatId, "admin");
@@ -316,22 +416,20 @@ class ChatService {
             });
           }
 
-          // A brief 700ms pause so the customer sees the grey check check turn blue first
-          await new Promise((resolve) => setTimeout(resolve, 700));
-
           // Call Orchestrator — it owns the ai:thinking_start/stop/error indicator lifecycle
           const chatOrchestrator = require("./chatOrchestrator");
-          const customerUser = await User.findById(senderId).select("email");
+          const customerUser = await User.findById(actualSenderId).select("email");
           const customerEmail = customerUser ? customerUser.email : null;
-          const customerId = senderId ? senderId.toString() : null;
+          const customerId = actualSenderId ? actualSenderId.toString() : null;
 
           const responseText = await chatOrchestrator.handleUserMessage(
             chatId, content, customerEmail, customerId
           );
 
+          // Bot response: only pass guestSessionId if this is a guest chat
           await this.sendMessage(chatId, botUserId, "bot", {
             content: responseText
-          });
+          }, senderRole === 'customer' && !senderId ? guestSessionId : null);
         } catch (error) {
           console.error("Chatbot processing error:", error.message);
         }
@@ -341,7 +439,7 @@ class ChatService {
     return message.populate("sender", "firstName lastName email role avatar");
   }
 
-  async getChatMessages(chatId, userId, userRole, options = {}) {
+  async getChatMessages(chatId, userId, userRole, guestSessionId, options = {}) {
     const chat = await Chat.findOne({
       _id: chatId,
       deletedAt: null,
@@ -351,14 +449,16 @@ class ChatService {
       throw new AppError("Chat not found", 404);
     }
 
-    if (userRole !== "admin" && chat.customer.toString() !== userId.toString()) {
+    // Authorization check
+    const isAuthorized = await this.authorizeChat(chatId, userId, userRole, guestSessionId);
+    if (!isAuthorized) {
       throw new AppError("You are not authorized to view these messages", 403);
     }
 
     return ChatMessage.getChatMessages(chatId, options);
   }
 
-  async markMessagesAsRead(chatId, userId, userRole) {
+  async markMessagesAsRead(chatId, userId, userRole, guestSessionId) {
     const chat = await Chat.findOne({
       _id: chatId,
       deletedAt: null,
@@ -368,7 +468,9 @@ class ChatService {
       throw new AppError("Chat not found", 404);
     }
 
-    if (userRole !== "admin" && chat.customer.toString() !== userId.toString()) {
+    // Authorization check
+    const isAuthorized = await this.authorizeChat(chatId, userId, userRole, guestSessionId);
+    if (!isAuthorized) {
       throw new AppError("You are not authorized to mark these messages", 403);
     }
 
@@ -404,7 +506,7 @@ class ChatService {
     return { modifiedCount };
   }
 
-  async updateTypingStatus(chatId, userId, userRole, isTyping) {
+  async updateTypingStatus(chatId, userId, userRole, guestSessionId, isTyping) {
     const chat = await Chat.findOne({
       _id: chatId,
       deletedAt: null,
@@ -414,7 +516,9 @@ class ChatService {
       throw new AppError("Chat not found", 404);
     }
 
-    if (userRole !== "admin" && chat.customer.toString() !== userId.toString()) {
+    // Authorization check
+    const isAuthorized = await this.authorizeChat(chatId, userId, userRole, guestSessionId);
+    if (!isAuthorized) {
       throw new AppError("You are not authorized to update this chat", 403);
     }
 
@@ -438,7 +542,7 @@ class ChatService {
     return { success: true };
   }
 
-  async closeChat(chatId, userId, userRole) {
+  async closeChat(chatId, userId, userRole, guestSessionId) {
     const chat = await Chat.findOne({
       _id: chatId,
       deletedAt: null,
@@ -448,7 +552,9 @@ class ChatService {
       throw new AppError("Chat not found", 404);
     }
 
-    if (userRole !== "admin" && chat.customer.toString() !== userId) {
+    // Authorization check
+    const isAuthorized = await this.authorizeChat(chatId, userId, userRole, guestSessionId);
+    if (!isAuthorized) {
       throw new AppError("You are not authorized to close this chat", 403);
     }
 
@@ -590,13 +696,15 @@ class ChatService {
     return hour >= 9 && hour < 18; // 9 AM – 6 PM
   }
 
-  async toggleBot(chatId, userId, role, botActive) {
+  async toggleBot(chatId, userId, role, guestSessionId, botActive) {
     const chat = await Chat.findOne({ _id: chatId, deletedAt: null });
     if (!chat) {
       throw new AppError("Chat not found", 404);
     }
 
-    if (role !== "admin" && chat.customer.toString() !== userId.toString()) {
+    // Authorization check
+    const isAuthorized = await this.authorizeChat(chatId, userId, role, guestSessionId);
+    if (!isAuthorized) {
       throw new AppError("You are not authorized to update this chat", 403);
     }
 
