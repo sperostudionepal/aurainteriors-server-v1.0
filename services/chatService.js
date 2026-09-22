@@ -21,43 +21,57 @@ class ChatService {
 
     const populatedChat = await chat.populate("customer", "firstName lastName email");
 
-    // Emit admin notification for new chat
-    try {
-      notificationEventEmitter.emit("admin:chat:started", {
-        chatId: chat._id,
-        customerName: populatedChat.customer ? `${populatedChat.customer.firstName} ${populatedChat.customer.lastName}` : null,
-        customerEmail: populatedChat.customer?.email,
-        subject,
-      });
-    } catch (error) {
-      console.error("Failed to emit admin:chat:started event:", error.message);
-    }
-
-    // Auto-create Welcome Message from AI bot
-    try {
-      const admin = await User.findOne({ role: 'admin' }).select('_id');
-
-      if (admin) {
-        await ChatMessage.create({
-          chat: chat._id,
-          sender: admin._id,
-          senderRole: 'bot',          // FIX 8: tagged as bot, not human admin
-          isAiGenerated: true,
-          messageType: 'text',
-          content: 'Hello! Welcome to Aura Interiors. How can I help you find the perfect piece for your home?',
-          deliveredAt: new Date(),
-          isRead: true
+    // Asynchronously dispatch admin notification and auto-welcome message in background
+    setImmediate(async () => {
+      // Emit admin notification for new chat
+      try {
+        notificationEventEmitter.emit("admin:chat:started", {
+          chatId: chat._id,
+          customerName: populatedChat.customer ? `${populatedChat.customer.firstName} ${populatedChat.customer.lastName}` : null,
+          customerEmail: populatedChat.customer?.email,
+          subject,
         });
-
-        // Update chat unread/lastMessage
-        await Chat.findByIdAndUpdate(chat._id, {
-          lastMessageAt: new Date(),
-          $inc: { unreadCountCustomer: 1 }
-        });
+      } catch (error) {
+        console.error("Failed to emit admin:chat:started event:", error.message);
       }
-    } catch (msgError) {
-      console.error("Failed to create automated welcome message:", msgError.message);
-    }
+
+      // Auto-create Welcome Message from AI bot
+      try {
+        const admin = await User.findOne({ role: 'admin' }).select('_id');
+
+        if (admin) {
+          const welcomeMessage = await ChatMessage.create({
+            chat: chat._id,
+            sender: admin._id,
+            senderRole: 'bot',          // FIX 8: tagged as bot, not human admin
+            isAiGenerated: true,
+            messageType: 'text',
+            content: 'Hello! Welcome to Aura Interiors. How can I help you find the perfect piece for your home?',
+            deliveredAt: new Date(),
+            isRead: true
+          });
+
+          // Update chat unread/lastMessage
+          await Chat.findByIdAndUpdate(chat._id, {
+            lastMessageAt: new Date(),
+            $inc: { unreadCountCustomer: 1 }
+          });
+
+          // Broadcast welcome message via socket if gateway is available
+          if (global.notificationGateway) {
+            const populatedMessage = await welcomeMessage.populate("sender", "firstName lastName email role avatar");
+            const roomId = chat._id.toString();
+            global.notificationGateway.io.to(`chat:${roomId}`).emit("chat:message:new", {
+              chatId: roomId,
+              message: populatedMessage.toObject(),
+              timestamp: new Date(),
+            });
+          }
+        }
+      } catch (msgError) {
+        console.error("Failed to create automated welcome message:", msgError.message);
+      }
+    });
 
     return populatedChat;
   }
